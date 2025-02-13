@@ -1,0 +1,408 @@
+#!/usr/bin/env python3 
+
+# -*- coding: utf-8 -*- 
+
+ """ النظام المتكامل للترقیات - الإصدار النھائي
+
+ :یتضمن
+
+ .لتحسین إدارة الجلسات session_scope مع SQLAlchemy إدارة البیانات باستخدام •
+
+ .(خدمات الأعمال (التحقق من أھلیة الترقیة، البحث المتقدم، تولید التقاریر •
+
+ :مع میزات مثل Tkinter واجھة المستخدم باستخدام •
+
+ .عرض بیانات الموظفین مع شریط بحث -   
+
+ .بحث متقدم -   
+
+ .إنشاء جداول محوریة وتصدیر تقاریر نصیة -   
+
+ .مع تضمین رسوم بیانیة Excelو PDF تصدیر التقاریر إلى -   
+
+""" 
+
+ 
+
+import os import sys import logging from logging.handlers import RotatingFileHandler from datetime import datetime, timedelta import tkinter as tk from tkinter import ttk, messagebox, filedialog, simpledialog import pandas as pd from sqlalchemy import create_engine, Column, Integer, String, Date, Float, ForeignKey from sqlalchemy.orm import relationship, sessionmaker, declarative_base from reportlab.lib.pagesizes import A4 from reportlab.pdfgen import canvas import matplotlib.pyplot as plt from contextlib import contextmanager 
+
+  إعدادات التسجیل #
+
+logger = logging.getLogger(__name__) logger.setLevel(logging.DEBUG) log_handler = RotatingFileHandler('system.log', maxBytes=1_000_000, backupCount=5) formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s') log_handler.setFormatter(formatter) logger.addHandler(log_handler) 
+
+ 
+
+ SQLAlchemy إعداد قاعدة البیانات باستخدام #
+
+Base = declarative_base() 
+
+ 
+
+class Rank(Base):     __tablename__ = 'ranks'     rank_id = Column(Integer, primary_key=True)     rank_name = Column(String)     category = Column(String)     employees = relationship("Employee", back_populates="rank") 
+
+ 
+
+class Promotion(Base): 
+
+    __tablename__ = 'promotions'     promotion_id = Column(Integer, primary_key=True)     employee_id = Column(Integer, ForeignKey('employees.employee_id'))     promotion_date = Column(Date)     grade_level = Column(Integer)     promotion_type = Column(String)     employee = relationship("Employee", back_populates="promotions") 
+
+ 
+
+class Evaluation(Base):     __tablename__ = 'evaluations'     evaluation_id = Column(Integer, primary_key=True)     employee_id = Column(Integer, ForeignKey('employees.employee_id'))     year = Column(Integer)     annual_points = Column(Float)     employee = relationship("Employee", back_populates="evaluations") 
+
+ 
+
+class Employee(Base):     __tablename__ = 'employees'     employee_id = Column(Integer, primary_key=True)     full_name = Column(String)     date_of_birth = Column(Date)     rank_id = Column(Integer, ForeignKey('ranks.rank_id'))     rank = relationship("Rank", back_populates="employees")     promotions = relationship("Promotion", back_populates="employee")     evaluations = relationship("Evaluation", back_populates="employee") 
+
+ # إدارة البیانات class DataManager:     def __init__(self, db_file='promotion_system.db'): 
+
+        self.required_files = ['config.csv', 'config_mapping.csv', 'ranks.csv', 'employees.csv']         for file in self.required_files:             if not os.path.exists(file): 
+
+                logger.error(f"الملف المطلوب غیر موجود: {file}")                 messagebox.showerror("خطأ", f"الملف {file} غیر موجود. یرجى إضافتھ.")                 sys.exit(1) 
+
+        self.engine = create_engine(f'sqlite:///{db_file}', echo=False)         Base.metadata.create_all(self.engine)         self.Session = sessionmaker(bind=self.engine)         self.config = self.load_config('config.csv')         self.mapping = self.load_column_mapping('config_mapping.csv')         self.ranks = self.load_ranks('ranks.csv')         self.employees = self.load_employees('employees.csv') 
+
+     
+
+    @contextmanager     def session_scope(self):         session = self.Session()         try: 
+
+            yield session 
+
+            session.commit()         except Exception as e:             session.rollback()             logger.error(f"خطأ في الجلسة: {e}")             raise         finally: 
+
+            session.close() 
+
+     
+
+    def load_config(self, filename):         try: 
+
+            df = pd.read_csv(filename)             return df.set_index('Key')['Value'].to_dict()         except Exception as e: 
+
+            logger.error(f"خطأ في تحمیل الإعدادات: {e}")             return {} 
+
+     
+
+    def load_column_mapping(self, filename):         try: 
+
+            df = pd.read_csv(filename) 
+
+            return df.set_index('ColumnName')['PropertyName'].to_dict()         except Exception as e: 
+
+            logger.error(f"خطأ في تحمیل تعیین الأعمدة: {e}")             return {} 
+
+     
+
+    def load_ranks(self, filename):         try: 
+
+            df = pd.read_csv(filename)             ranks = {}             with self.session_scope() as session:                 for _, row in df.iterrows():                     rank = Rank(                         rank_id=row['Rank_ID'],                         rank_name=row['Rank_Name'],                         category=row['Category'] 
+
+                    ) 
+
+                    session.add(rank)                     ranks[row['Rank_ID']] = rank             return ranks         except Exception as e: 
+
+            logger.error(f"خطأ في تحمیل بیانات الرتب: {e}")             return {} 
+
+     
+
+    def load_employees(self, filename):         try: 
+
+            df = pd.read_csv(filename)             employees = []             with self.session_scope() as session:                 for _, row in df.iterrows(): 
+
+                    try: 
+
+                        dob = datetime.strptime(row['Date_of_Birth'], '%Y-%m-%d').date()                     except Exception as e: 
+
+                        logger.error(f"خطأ في تاریخ المیلاد للموظف {row.get('Employee_ID')}: {e}")                         continue                     emp = Employee(                         employee_id=row['Employee_ID'],                         full_name=row['Full_Name'],                         date_of_birth=dob,                         rank_id=row['Rank_ID'] 
+
+                    )                     # معالجة الترقیة                     if pd.notna(row.get('PromotionDate')):                         try: 
+
+                            promo_date = datetime.strptime(row['PromotionDate'], '%Y-%m-%d').date()                             promo = Promotion(                                 promotion_date=promo_date,                                 grade_level=row.get('GradeLevel', None),                                 promotion_type=row.get('PromotionType', 'عادي') 
+
+                            ) 
+
+                            emp.promotions.append(promo)                         except Exception as e: 
+
+                            logger.error(f"خطأ في معالجة تاریخ الترقیة للموظف {row.get('Employee_ID')}: {e}") 
+
+                    # معالجة التقیم                     if pd.notna(row.get('AnnualPoints')):                         try: 
+
+                            eval_obj = Evaluation(                                 year=row.get('EvaluationYear', datetime.now().year),                                 annual_points=row['AnnualPoints'] 
+
+                            ) 
+
+                            emp.evaluations.append(eval_obj)                         except Exception as e: 
+
+                            logger.error(f"خطأ في معالجة التقیم للموظف {row.get('Employee_ID')}: {e}")                     session.add(emp)                     employees.append(emp)             return employees         except Exception as e: 
+
+            logger.error(f"خطأ في تحمیل بیانات الموظفین: {e}")             return [] 
+
+ # طبقة الخدمات class DataService:     def __init__(self, data_manager): 
+
+        self.dm = data_manager 
+
+     
+
+    def get_all_employees(self):         with self.dm.session_scope() as session:             return session.query(Employee).all()     def is_eligible(self, employee):         if not employee.promotions: 
+
+            return False         last_promo = employee.promotions[-1]         threshold = int(self.dm.config.get(f"Threshold_{last_promo.promotion_type}", 365))         next_date = last_promo.promotion_date + timedelta(days=threshold)         return datetime.now().date() >= next_date 
+
+     
+
+    def search_employees(self, criteria):         with self.dm.session_scope() as session: 
+
+            query = session.query(Employee)             if criteria.get('full_name'): 
+
+                query = query.filter(Employee.full_name.ilike(f"%{criteria['full_name']}%"))             if criteria.get('rank_id'): 
+
+                query = query.filter(Employee.rank_id == criteria['rank_id'])             if criteria.get('promotion_type'): 
+
+                query = query.join(Promotion).filter(Promotion.promotion_type == criteria['promotion_type'])             return query.all() 
+
+     
+
+    def get_employees_dataframe(self): 
+
+        with self.dm.session_scope() as session: 
+
+            return pd.read_sql(session.query(Employee).statement, session.bind) 
+
+     
+
+    def generate_report_text(self): 
+
+        lines = ["تقریر الترقیات", "===================="]         employees = self.get_all_employees()         for emp in employees: 
+
+            eligible = "مؤھل" if self.is_eligible(emp) else "غیر مؤھل"             lines.append(f"{emp.full_name} (ID: {emp.employee_id}) - {eligible}")         return "\n".join(lines) 
+
+ # واجھة المستخدم الرسومیة class PivotWindow(tk.Toplevel):     def __init__(self, data_service): 
+
+        super().__init__()         self.ds = data_service         self.title("إنشاء جدول محوري")         self.geometry("600x400")         self.create_widgets() 
+
+     
+
+    def create_widgets(self): 
+
+        ttk.Label(self, text="حدد الحقل الصفّي:").pack(padx=5, pady=5, anchor="w")         self.row_var = tk.StringVar(value="rank_id")         self.row_combo = ttk.Combobox(self, textvariable=self.row_var, values=["rank_id", 
+
+"employee_id"]) self.row_combo.pack(fill="x", padx=5)         ttk.Label(self, text="حدد الحقل القیمي:").pack(padx=5, pady=5, anchor="w")         self.value_var = tk.StringVar(value="AnnualPoints")         self.value_combo = ttk.Combobox(self, textvariable=self.value_var, values=["AnnualPoints", "GradeLevel"])         self.value_combo.pack(fill="x", padx=5) 
+
+         
+
+        ttk.Label(self, text="حدد دالة التجمیع:").pack(padx=5, pady=5, anchor="w")         self.agg_var = tk.StringVar(value="mean")         self.agg_combo = ttk.Combobox(self, textvariable=self.agg_var, values=["sum", 
+
+"mean", "count", "max", "min"]) 
+
+        self.agg_combo.pack(fill="x", padx=5) 
+
+         
+
+        ttk.Button(self, text="إنشاء الجدول المحوري", command=self.generate_pivot).pack(pady=10) 
+
+         
+
+        self.txt_result = tk.Text(self, wrap="none")         self.txt_result.pack(fill="both", expand=True, padx=5, pady=5) 
+
+         
+
+        ttk.Button(self, text="تصدیر التقریر", command=self.export_report).pack(pady=5) 
+
+     
+
+    def generate_pivot(self):         try: 
+
+            df = self.ds.get_employees_dataframe() 
+
+            pivot_df = pd.pivot_table(df, index=self.row_var.get(), values=self.value_var.get(), aggfunc=self.agg_var.get())             self.txt_result.delete("1.0", tk.END)             self.txt_result.insert(tk.END, pivot_df.to_string())         except Exception as e: 
+
+            messagebox.showerror("خطأ", f"فشل إنشاء الجدول المحوري: {e}")             logger.error(f"Error generating pivot table: {e}") 
+
+     
+
+    def export_report(self): 
+
+        report = self.txt_result.get("1.0", tk.END)         try:             with open("pivot_report.txt", "w", encoding="utf-8") as f:                 f.write(report)             messagebox.showinfo("نجاح", "تم حفظ التقریر في pivot_report.txt")         except Exception as e: 
+
+            messagebox.showerror("خطأ", f"فشل تصدیر التقریر: {e}")             logger.error(f"Error exporting pivot report: {e}") 
+
+ 
+
+class AdvancedSearchDialog(tk.Toplevel):     def __init__(self, parent, data_service, callback): 
+
+        super().__init__(parent)         self.ds = data_service         self.callback = callback         self.title("بحث متقدم") 
+
+self.geometry("400x250") 
+
+self.create_widgets() 
+
+     
+
+    def create_widgets(self): 
+
+        ttk.Label(self, text="الاسم:").pack(anchor="w", padx=5, pady=5)         self.entry_name = ttk.Entry(self)         self.entry_name.pack(fill="x", padx=5) 
+
+         
+
+        ttk.Label(self, text="الرتبة (رقم):").pack(anchor="w", padx=5, pady=5)         self.entry_rank = ttk.Entry(self)         self.entry_rank.pack(fill="x", padx=5) 
+
+         
+
+        ttk.Label(self, text="نوع الترقیة:").pack(anchor="w", padx=5, pady=5)         self.entry_promo = ttk.Entry(self)         self.entry_promo.pack(fill="x", padx=5) 
+
+         
+
+        ttk.Button(self, text="بحث", command=self.perform_search).pack(pady=10) 
+
+     
+
+    def perform_search(self):         criteria = { 
+
+            'full_name': self.entry_name.get().strip(), 
+
+            'rank_id': int(self.entry_rank.get().strip()) if self.entry_rank.get().strip().isdigit() else None, 
+
+            'promotion_type': self.entry_promo.get().strip() 
+
+        } 
+
+        results = self.ds.search_employees(criteria)         self.callback(results)         self.destroy() 
+
+ 
+
+class PromotionApp(tk.Tk):     def __init__(self, data_service):         super().__init__() 
+
+        self.title("النظام المتكامل للترقیات")         self.geometry("1200x800")         self.ds = data_service         self.create_menu()         self.create_widgets()         self.update_treeview() 
+
+     
+
+    def create_menu(self): 
+
+        menubar = tk.Menu(self) 
+
+ قائمة الملف #        
+
+        file_menu = tk.Menu(menubar, tearoff=0)         file_menu.add_command(label="تصدیر PDF", command=self.export_pdf)         file_menu.add_command(label="تصدیر Excel", command=self.export_excel)         file_menu.add_separator()         file_menu.add_command(label="خروج", command=self.quit)         menubar.add_cascade(label="ملف", menu=file_menu) 
+
+ 
+
+ قائمة الإعدادات #
+
+        config_menu = tk.Menu(menubar, tearoff=0)         config_menu.add_command(label="إعادة تحمیل البیانات", command=self.reload_data)         menubar.add_cascade(label="إعدادات", menu=config_menu) 
+
+          قائمة البحث #        
+
+        search_menu = tk.Menu(menubar, tearoff=0)         search_menu.add_command(label="بحث متقدم", command=self.open_advanced_search)         menubar.add_cascade(label="بحث", menu=search_menu) 
+
+          قائمة الجداول المحوریة #        
+
+        pivot_menu = tk.Menu(menubar, tearoff=0)         pivot_menu.add_command(label="جدول محوري", command=self.open_pivot_window)         menubar.add_cascade(label="جداول محوریة", menu=pivot_menu) 
+
+         
+
+        self.config(menu=menubar) 
+
+     
+
+    def create_widgets(self): 
+
+        main_frame = ttk.Frame(self)         main_frame.pack(fill="both", expand=True, padx=10, pady=10) 
+
+          شریط البحث #        
+
+        search_frame = ttk.Frame(main_frame)         search_frame.pack(fill="x", pady=5)         ttk.Label(search_frame, text="بحث:").pack(side="left")         self.search_entry = ttk.Entry(search_frame)         self.search_entry.pack(side="left", fill="x", expand=True, padx=5)         self.search_entry.bind("<KeyRelease>", lambda e: self.update_treeview()) 
+
+                 # جدول عرض الموظفین         self.tree = ttk.Treeview(main_frame, columns=("ID", "Name", "Rank", "Eligible"), show="headings") 
+
+        self.tree.heading("ID", text="المعرف")         self.tree.heading("Name", text="الاسم")         self.tree.heading("Rank", text="الرتبة")         self.tree.heading("Eligible", text="الأھلیة")         self.tree.pack(fill="both", expand=True) 
+
+     
+
+    def update_treeview(self, employees=None):         self.tree.delete(*self.tree.get_children())         if employees is None: 
+
+            employees = self.ds.get_all_employees()         for emp in employees: 
+
+            eligible = "مؤھل" if self.ds.is_eligible(emp) else "غیر مؤھل"             if self.search_entry.get().strip().lower() in emp.full_name.lower(): 
+
+                self.tree.insert("", "end", values=(emp.employee_id, emp.full_name, emp.rank.rank_name if emp.rank else "", eligible)) 
+
+     
+
+    def open_advanced_search(self): 
+
+        AdvancedSearchDialog(self, self.ds, self.update_treeview) 
+
+     
+
+    def open_pivot_window(self): 
+
+        PivotWindow(self.ds) 
+
+     
+
+    def reload_data(self):         self.ds.dm = DataManager()  # إعادة تحمیل البیانات         self.update_treeview() 
+
+ (".نجاح", "تم إعادة تحمیل البیانات بنجاحmessagebox.showinfo("        
+
+     
+
+    def generate_chart(self): 
+
+        employees = self.ds.get_all_employees()         eligible_count = sum(1 for emp in employees if self.ds.is_eligible(emp))         non_eligible_count = len(employees) - eligible_count 
+
+        labels = ['مؤھل', 'غیر مؤھل']         sizes = [eligible_count, non_eligible_count]         plt.figure(figsize=(4,4)) 
+
+        plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90) 
+
+        plt.title("نسبة أھلیة الموظفین")         chart_file = "chart.png"         plt.savefig(chart_file)         plt.close()         return chart_file 
+
+     
+
+    def export_pdf(self): 
+
+        report = self.ds.generate_report_text()         filename = filedialog.asksaveasfilename(defaultextension=".pdf")         if filename: 
+
+            try: 
+
+                c = canvas.Canvas(filename, pagesize=A4)                 c.setFont("Helvetica-Bold", 16) 
+
+                c.drawString(50, 820, "تقریر الترقیات") 
+
+                c.setFont("Helvetica", 12)                 y = 800                 for line in report.split("\n"): 
+
+                    c.drawString(50, y, line)                     y -= 15                     if y < 100: 
+
+                        c.showPage()                         y = 820                 # إضافة الرسم البیاني في صفحة جدیدة                 c.showPage()                 chart_file = self.generate_chart() 
+
+                c.drawImage(chart_file, 50, 400, width=500, height=300) 
+
+                c.setFont("Helvetica-Oblique", 10) 
+
+                c.drawString(50, 50, "نھایة التقریر") 
+
+                c.save() 
+
+                messagebox.showinfo("نجاح", f"تم حفظ التقریر في {filename}")             except Exception as e: 
+
+                messagebox.showerror("خطأ", f"حدث خطأ أثناء تصدیر PDF: {e}")                 logger.error(f"Error exporting PDF: {e}") 
+
+     
+
+    def export_excel(self): 
+
+        filename = filedialog.asksaveasfilename(defaultextension=".xlsx")         if filename:             try:                 with self.ds.dm.session_scope() as session: 
+
+                    df = pd.read_sql(session.query(Employee).statement, session.bind) 
+
+                header = "تقریر الترقیات"                 with pd.ExcelWriter(filename, engine='xlsxwriter') as writer: 
+
+                    df.to_excel(writer, index=False, startrow=2)                     workbook  = writer.book                     worksheet = writer.sheets['Sheet1']                     header_format = workbook.add_format({'bold': True, 'font_color': 'blue', 'align': 
+
+'center'}) 
+
+                    worksheet.merge_range('A1:D1', header, header_format)                 messagebox.showinfo("نجاح", f"تم حفظ التقریر في {filename}")             except Exception as e: 
+
+                messagebox.showerror("خطأ", f"حدث خطأ أثناء تصدیر Excel: {e}")                 logger.error(f"Error exporting Excel: {e}") 
+
+ 
+
+if __name__ == "__main__":     dm = DataManager()     ds = DataService(dm)     app = PromotionApp(ds)     app.mainloop() 
+
